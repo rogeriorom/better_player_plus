@@ -29,6 +29,7 @@ import androidx.media3.ui.PlayerNotificationManager.BitmapCallback
 import androidx.work.OneTimeWorkRequest
 import android.util.Log
 import android.view.Surface
+import androidx.annotation.OptIn
 import androidx.annotation.RequiresApi
 import androidx.lifecycle.Observer
 import androidx.media3.extractor.DefaultExtractorsFactory
@@ -44,6 +45,7 @@ import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.common.Timeline
 import androidx.media3.common.TrackSelectionOverride
+import androidx.media3.common.util.UnstableApi
 import androidx.media3.common.util.Util
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DefaultDataSource
@@ -75,8 +77,9 @@ import java.util.*
 import kotlin.math.max
 import kotlin.math.min
 
+@SuppressLint("UnsafeOptInUsageError")
 internal class BetterPlayer(
-    context: Context,
+    private val context: Context,
     private val eventChannel: EventChannel,
     private val textureEntry: SurfaceTextureEntry,
     customDefaultLoadControl: CustomDefaultLoadControl?,
@@ -101,6 +104,9 @@ internal class BetterPlayer(
     private val customDefaultLoadControl: CustomDefaultLoadControl =
         customDefaultLoadControl ?: CustomDefaultLoadControl()
     private var lastSendBufferedPosition = 0L
+    private var width = 0
+    private var height = 0
+    private var bitrate = 0
 
     init {
         val loadBuilder = DefaultLoadControl.Builder()
@@ -136,6 +142,7 @@ internal class BetterPlayer(
         cacheKey: String?,
         clearKey: String?
     ) {
+        Log.v(TAG, "Start BetterPlayer #########################")
         this.key = key
         isInitialized = false
         val uri = Uri.parse(dataSource)
@@ -561,6 +568,10 @@ internal class BetterPlayer(
     }
 
     fun setTrackParameters(width: Int, height: Int, bitrate: Int) {
+        this.width = width
+        this.height = height
+        this.bitrate = bitrate
+
         val parametersBuilder = trackSelector.buildUponParameters()
         if (width != 0 && height != 0) {
             parametersBuilder.setMaxVideoSize(width, height)
@@ -672,15 +683,21 @@ internal class BetterPlayer(
         try {
             val mappedTrackInfo = trackSelector.currentMappedTrackInfo
             if (mappedTrackInfo != null) {
+                Log.v(TAG, "Renderer Count: ${mappedTrackInfo.rendererCount}")
+
                 for (rendererIndex in 0 until mappedTrackInfo.rendererCount) {
                     if (mappedTrackInfo.getRendererType(rendererIndex) != C.TRACK_TYPE_AUDIO) {
                         continue
                     }
                     val trackGroupArray = mappedTrackInfo.getTrackGroups(rendererIndex)
+                    Log.v(TAG, "Track group array length: ${trackGroupArray.length}")
+
                     var hasElementWithoutLabel = false
                     var hasStrangeAudioTrack = false
+
                     for (groupIndex in 0 until trackGroupArray.length) {
                         val group = trackGroupArray[groupIndex]
+                        Log.v(TAG, "Processing group $groupIndex with length ${group.length}")
                         for (groupElementIndex in 0 until group.length) {
                             val format = group.getFormat(groupElementIndex)
                             if (format.label == null) {
@@ -689,50 +706,81 @@ internal class BetterPlayer(
                             if (format.id != null && format.id == "1/15") {
                                 hasStrangeAudioTrack = true
                             }
+                            Log.v(TAG, "Audio Track: ${format.label}, ID: ${format.id}")
                         }
                     }
+
                     for (groupIndex in 0 until trackGroupArray.length) {
                         val group = trackGroupArray[groupIndex]
                         for (groupElementIndex in 0 until group.length) {
                             val label = group.getFormat(groupElementIndex).label
+                            Log.v(TAG, "Comparing track label: $label with name: $name at index: $index")
                             if (name == label && index == groupIndex) {
+                                Log.v(TAG, "Setting audio track for renderer $rendererIndex and group $groupIndex")
                                 setAudioTrack(rendererIndex, groupIndex)
                                 return
                             }
-
-                            ///Fallback option
                             if (!hasStrangeAudioTrack && hasElementWithoutLabel && index == groupIndex) {
+                                Log.v(TAG, "Fallback: setting audio track without label for renderer $rendererIndex and group $groupIndex")
                                 setAudioTrack(rendererIndex, groupIndex)
                                 return
                             }
-                            ///Fallback option
                             if (hasStrangeAudioTrack && name == label) {
+                                Log.v(TAG, "Fallback: setting strange audio track for renderer $rendererIndex and group $groupIndex")
                                 setAudioTrack(rendererIndex, groupIndex)
                                 return
                             }
                         }
                     }
                 }
+            } else {
+                Log.e(TAG, "MappedTrackInfo is null")
             }
         } catch (exception: Exception) {
-            Log.e(TAG, "setAudioTrack failed$exception")
+            Log.e(TAG, "setAudioTrack failed - name: $name, index: $index, exception: ${exception.message}")
         }
     }
 
     private fun setAudioTrack(rendererIndex: Int, groupIndex: Int) {
         val mappedTrackInfo = trackSelector.currentMappedTrackInfo
-        if (mappedTrackInfo != null) {
-            val builder = trackSelector.parameters.buildUpon()
-                .setRendererDisabled(rendererIndex, false)
-                .addOverride(
-                    TrackSelectionOverride(
-                        mappedTrackInfo.getTrackGroups(rendererIndex).get(groupIndex),
-                        mappedTrackInfo.getTrackGroups(rendererIndex)
-                            .indexOf(mappedTrackInfo.getTrackGroups(rendererIndex).get(groupIndex))
-                    )
-                )
+        if (mappedTrackInfo == null) {
+            Log.e(TAG, "MappedTrackInfo is null")
+            return
+        }
 
-            trackSelector.setParameters(builder)
+        try {
+            if (rendererIndex < 0 || rendererIndex >= mappedTrackInfo.rendererCount) {
+                Log.e(TAG, "Invalid rendererIndex: $rendererIndex. Renderer count: ${mappedTrackInfo.rendererCount}")
+                return
+            }
+
+            val trackGroups = mappedTrackInfo.getTrackGroups(rendererIndex)
+            if (groupIndex < 0 || groupIndex >= trackGroups.length) {
+                Log.e(TAG, "Invalid groupIndex: $groupIndex for rendererIndex: $rendererIndex. Track group length: ${trackGroups.length}")
+                return
+            }
+
+            val group = trackGroups[groupIndex]
+            Log.v(TAG, "Setting audio track for rendererIndex: $rendererIndex, groupIndex: $groupIndex")
+
+            DefaultTrackSelector(context)
+                .buildUponParameters()
+                .apply {
+                    if (width != 0 && height != 0) setMaxVideoSize(width, height)
+                    if (bitrate != 0) setMaxVideoBitrate(bitrate)
+                    if (width == 0 && height == 0 && bitrate == 0) {
+                        clearVideoSizeConstraints()
+                        setMaxVideoBitrate(Int.MAX_VALUE)
+                    }
+                }
+                .setRendererDisabled(rendererIndex, false)
+                .addOverride(TrackSelectionOverride(group, 0))
+                .let { trackSelector.setParameters(it) }
+
+            Log.v(TAG, "Audio track set successfully for rendererIndex: $rendererIndex, groupIndex: $groupIndex")
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Error setting audio track for rendererIndex: $rendererIndex, groupIndex: $groupIndex", e)
         }
     }
 

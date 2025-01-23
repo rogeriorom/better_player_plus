@@ -1,3 +1,5 @@
+// ignore_for_file: unreachable_switch_default
+
 import 'dart:async';
 import 'dart:io';
 import 'package:better_player_plus/better_player_plus.dart';
